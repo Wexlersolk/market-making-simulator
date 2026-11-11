@@ -226,5 +226,12 @@ __marimo__/
 *.zip
 *.tar.gz
 
-
-
+# Study and interactive sandbox notes
+study/
+sandbox/
+*.study.*
+*.sandbox.*
+.study_notes/
+visualizer/
+*visualizer*
+*dashboard*
