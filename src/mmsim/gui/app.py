@@ -242,6 +242,31 @@ class MainWindow(QMainWindow):
         self.chk_ab_duel.stateChanged.connect(self.update_sim_ui)
         sc_layout.addWidget(self.chk_ab_duel)
 
+        self.chk_manual_mm = QCheckBox("Play as MM (W/S Skew, A/D Spread, Space Flat)")
+        self.chk_manual_mm.setChecked(False)
+        self.chk_manual_mm.stateChanged.connect(self.on_manual_mm_toggled)
+        sc_layout.addWidget(self.chk_manual_mm)
+
+        self.manual_skew_ticks = 0
+        self.manual_hs_ticks = 2
+        self.manual_ctrl_frame = QFrame()
+        mc_lay = QHBoxLayout(self.manual_ctrl_frame)
+        mc_lay.setContentsMargins(0, 0, 0, 0)
+        mc_lay.setSpacing(4)
+        for lbl, fn in [
+            ("Skew- (S)", lambda: self._adjust_manual_quote(-1, 0)),
+            ("Skew+ (W)", lambda: self._adjust_manual_quote(1, 0)),
+            ("Tight (A)", lambda: self._adjust_manual_quote(0, -1)),
+            ("Wide (D)", lambda: self._adjust_manual_quote(0, 1)),
+            ("Flat", self.on_flatten_manual_inv),
+        ]:
+            b = QPushButton(lbl)
+            b.setStyleSheet("padding: 4px 6px; font-size: 11px;")
+            b.clicked.connect(fn)
+            mc_lay.addWidget(b)
+        self.manual_ctrl_frame.setVisible(False)
+        sc_layout.addWidget(self.manual_ctrl_frame)
+
         self.btn_play = QPushButton("START AUTO-SIMULATION")
         self.btn_play.setObjectName("primaryBtn")
         self.btn_play.clicked.connect(self.toggle_simulation)
@@ -409,14 +434,72 @@ class MainWindow(QMainWindow):
             self.btn_play.setStyleSheet("background-color: #d9534f; border-color: #ff5252; color: white; font-weight: 700;")
             self.set_narration("Live HFT simulation running (300ms/tick)...", "info")
 
+    def on_manual_mm_toggled(self):
+        active = self.chk_manual_mm.isChecked()
+        self.manual_ctrl_frame.setVisible(active)
+        if active:
+            self.setFocus()
+            self.set_narration(
+                "Manual MM Mode ON: W/S = Skew quotes up/down, A/D = Tighten/Widen spread, Space = Flatten inventory.",
+                "info",
+            )
+        else:
+            self.set_narration("Switched back to Automated Avellaneda-Stoikov quoting.", "info")
+
+    def _manual_bid_ask(self) -> tuple[float, float]:
+        t = self.sim.tick_size
+        center = self.sim.fair_price + (self.manual_skew_ticks * t)
+        hs = max(1, self.manual_hs_ticks) * t
+        return round(center - hs, 4), round(center + hs, 4)
+
+    def _adjust_manual_quote(self, d_skew: int, d_hs: int):
+        self.manual_skew_ticks = max(-10, min(10, self.manual_skew_ticks + d_skew))
+        self.manual_hs_ticks = max(1, min(12, self.manual_hs_ticks + d_hs))
+        b, a = self._manual_bid_ask()
+        self.set_narration(
+            f"Manual Quotes -> Skew: {self.manual_skew_ticks:+d} ticks | Half-Spread: {self.manual_hs_ticks} ticks (${b:.2f} / ${a:.2f})",
+            "info",
+        )
+
+    def on_flatten_manual_inv(self):
+        q = self.sim.flatten_mm_inventory()
+        if abs(q) > 0:
+            self.update_sim_ui()
+            self.set_narration(f"Flattened {q:+.0f} units at market (1-tick crossing cost).", "success")
+
+    def keyPressEvent(self, event):
+        if self.chk_manual_mm.isChecked() and self.tabs.currentIndex() == 0:
+            k = event.key()
+            if k == Qt.Key.Key_W:
+                self._adjust_manual_quote(1, 0)
+                return
+            elif k == Qt.Key.Key_S:
+                self._adjust_manual_quote(-1, 0)
+                return
+            elif k == Qt.Key.Key_A:
+                self._adjust_manual_quote(0, -1)
+                return
+            elif k == Qt.Key.Key_D:
+                self._adjust_manual_quote(0, 1)
+                return
+            elif k == Qt.Key.Key_Space:
+                self.on_flatten_manual_inv()
+                return
+        super().keyPressEvent(event)
+
     def on_sim_timer_tick(self):
         self.step_sim_ticks(1)
 
     def step_sim_ticks(self, count: int):
         for _ in range(count):
-            events = self.sim.step(auto_quote=True)
+            cq = self._manual_bid_ask() if self.chk_manual_mm.isChecked() else None
+            events = self.sim.step(auto_quote=(cq is None), custom_quotes=cq)
             step = self.sim.step_count
-            bid, ask, res_p = self.sim.mm.compute_quotes(self.sim.fair_price)
+            if cq is not None:
+                bid, ask = cq
+                res_p = (bid + ask) / 2.0
+            else:
+                bid, ask, res_p = self.sim.mm.compute_quotes(self.sim.fair_price)
             micro = self.signal_engine.compute_micro_price(self.sim.book) or self.sim.fair_price
             bb = self.sim.book.best_bid() or bid
             ba = self.sim.book.best_ask() or ask

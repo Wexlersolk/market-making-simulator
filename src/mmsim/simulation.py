@@ -156,7 +156,22 @@ class MarketSimulator:
         ask = self._round_price(self.fair_price + half)
         self._place_quotes_on_book(self.baseline_book, self.baseline_mm, bid, ask, quote_size, "BL")
 
-    def step(self, auto_quote: bool = True) -> list[SimEvent]:
+    def flatten_mm_inventory(self) -> float:
+        """Flatten MM inventory immediately at fair_price (crossing 1-tick spread penalty)."""
+        q = self.mm.inventory
+        if abs(q) < 1e-6:
+            return 0.0
+        # Pay 1-tick crossing cost per unit to flatten
+        cross_px = self.fair_price - self.tick_size if q > 0 else self.fair_price + self.tick_size
+        self.mm.cash += q * cross_px
+        self.mm.inventory = 0.0
+        return q
+
+    def step(
+        self,
+        auto_quote: bool = True,
+        custom_quotes: Optional[tuple[float, float]] = None,
+    ) -> list[SimEvent]:
         """Advance simulation by 1 discrete tick."""
         self.step_count += 1
         self.current_time += 1.0
@@ -186,14 +201,20 @@ class MarketSimulator:
 
         # 2. Check Network Latency (Feed + Order transit vs 50ms tick window)
         sampled_rtt_ms = (self.latency.sample_feed_latency_sec() + self.latency.sample_order_latency_sec()) * 1000.0
-        quote_delayed = auto_quote and (self.step_count > 1) and (random.random() < min(0.92, max(0.0, (sampled_rtt_ms - 2.0) / 100.0)))
+        quote_delayed = (auto_quote or custom_quotes is not None) and (self.step_count > 1) and (random.random() < min(0.92, max(0.0, (sampled_rtt_ms - 2.0) / 100.0)))
 
         # If NOT delayed, MM updates quotes BEFORE incoming taker flow arrives
-        if auto_quote and not quote_delayed:
-            bid, ask, _ = self.mm.compute_quotes(self.fair_price)
-            q_events = self.update_mm_quotes(bid, ask, quote_size=5.0)
-            events.extend(q_events)
-            self._update_baseline_quotes(quote_size=5.0)
+        if not quote_delayed:
+            if custom_quotes is not None:
+                bid, ask = custom_quotes
+                q_events = self.update_mm_quotes(bid, ask, quote_size=5.0)
+                events.extend(q_events)
+                self._update_baseline_quotes(quote_size=5.0)
+            elif auto_quote:
+                bid, ask, _ = self.mm.compute_quotes(self.fair_price)
+                q_events = self.update_mm_quotes(bid, ask, quote_size=5.0)
+                events.extend(q_events)
+                self._update_baseline_quotes(quote_size=5.0)
 
         # 3. Simulate Incoming Taker Flow
         flow_prob = 0.70
@@ -257,11 +278,17 @@ class MarketSimulator:
                     self.baseline_mm.on_fill(trade, self.fair_price)
 
         # If delayed by network latency, MM's new quotes arrive AFTER taker flow
-        if auto_quote and quote_delayed:
-            bid, ask, _ = self.mm.compute_quotes(self.fair_price)
-            q_events = self.update_mm_quotes(bid, ask, quote_size=5.0)
-            events.extend(q_events)
-            self._update_baseline_quotes(quote_size=5.0)
+        if quote_delayed:
+            if custom_quotes is not None:
+                bid, ask = custom_quotes
+                q_events = self.update_mm_quotes(bid, ask, quote_size=5.0)
+                events.extend(q_events)
+                self._update_baseline_quotes(quote_size=5.0)
+            elif auto_quote:
+                bid, ask, _ = self.mm.compute_quotes(self.fair_price)
+                q_events = self.update_mm_quotes(bid, ask, quote_size=5.0)
+                events.extend(q_events)
+                self._update_baseline_quotes(quote_size=5.0)
 
         # Ensure at least a QUOTE/PRICE_MOVE event is emitted per step
         if not events:
