@@ -1050,7 +1050,7 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(grp_market)
 
-        grp_hedge = QGroupBox("Delta-Neutral Hedging")
+        grp_hedge = QGroupBox("Delta-Neutral Hedging & Gamma Scalping")
         h_layout = QVBoxLayout(grp_hedge)
 
         self.hedge_status_lbl = QLabel("Portfolio is Delta-Neutral")
@@ -1061,6 +1061,28 @@ class MainWindow(QMainWindow):
         self.btn_hedge.setObjectName("primaryBtn")
         self.btn_hedge.clicked.connect(self.on_execute_delta_hedge)
         h_layout.addWidget(self.btn_hedge)
+
+        th_row = QHBoxLayout()
+        th_row.addWidget(QLabel("Auto-Hedge |Δ| ≥:"))
+        self.spn_hedge_thresh = QSpinBox()
+        self.spn_hedge_thresh.setRange(1, 200)
+        self.spn_hedge_thresh.setValue(25)
+        th_row.addWidget(self.spn_hedge_thresh)
+        h_layout.addLayout(th_row)
+
+        self.opt_timer = QTimer(self)
+        self.opt_timer.timeout.connect(self.on_opt_timer_tick)
+        self.is_opt_running = False
+        self.opt_hedge_fees = 0.0
+        self.opt_hedge_count = 0
+
+        self.btn_opt_play = QPushButton("START AUTO-GAMMA SCALP LOOP")
+        self.btn_opt_play.clicked.connect(self.toggle_options_loop)
+        h_layout.addWidget(self.btn_opt_play)
+
+        self.lbl_scalp_stats = QLabel("Hedges: 0 | Fees: $0.00 | MTM: $0.00")
+        self.lbl_scalp_stats.setStyleSheet("font-family: 'JetBrains Mono'; font-size: 11px; color: #8b949e;")
+        h_layout.addWidget(self.lbl_scalp_stats)
 
         btn_reset_port = QPushButton("Reset Portfolio")
         btn_reset_port.clicked.connect(self.reset_options_port)
@@ -1138,6 +1160,9 @@ class MainWindow(QMainWindow):
         exp_prices = [BlackScholesEngine.price(s_i, k, 0.04, vol, 0.0, otype) for s_i in s_range]
         port_pnls = [self.options_port.mark_to_market(s_i, 0.04, vol) - self.initial_options_cash for s_i in s_range]
         cur_port_pnl = self.options_port.mark_to_market(self.underlying_s, 0.04, vol) - self.initial_options_cash
+        self.lbl_scalp_stats.setText(
+            f"Hedges: {self.opt_hedge_count} | Fees: ${self.opt_hedge_fees:.2f} | MTM: ${cur_port_pnl:+,.2f}"
+        )
 
         ax1.set_facecolor("#0b0f14")
         ax1.plot(s_range, exp_prices, "--", color="#6e7681", label="Expiry Payoff", linewidth=1.4)
@@ -1239,22 +1264,66 @@ class MainWindow(QMainWindow):
         self.update_options_ui()
         self.set_narration("1 calendar day elapsed (Theta decay applied).", "info")
 
+    def toggle_options_loop(self):
+        if self.is_opt_running:
+            self.opt_timer.stop()
+            self.is_opt_running = False
+            self.btn_opt_play.setText("START AUTO-GAMMA SCALP LOOP")
+            self.btn_opt_play.setStyleSheet("")
+            self.set_narration("Auto-Gamma Scalp loop paused.", "info")
+        else:
+            self.opt_timer.start(350)
+            self.is_opt_running = True
+            self.btn_opt_play.setText("PAUSE GAMMA SCALP LOOP")
+            self.btn_opt_play.setStyleSheet("background-color: #d9534f; border-color: #ff5252; color: white; font-weight: 700;")
+            self.set_narration("Auto-Gamma Scalp loop running (spot random walk + auto delta-hedge)...", "info")
+
+    def on_opt_timer_tick(self):
+        vol = self.spn_vol.value()
+        # Daily-scale spot move (0.25 day per tick)
+        dt_years = 0.25 / 365.0
+        ds = self.underlying_s * vol * (dt_years ** 0.5) * float(np.random.normal())
+        self.underlying_s = max(10.0, round(self.underlying_s + ds, 2))
+        self.lbl_spot_s.setText(f"Underlying Spot (S): ${self.underlying_s:.2f}")
+
+        for pos in self.options_port.positions:
+            pos.contract.expiry_years = max(0.0, pos.contract.expiry_years - dt_years)
+
+        net_g = self.options_port.net_greeks(self.underlying_s, 0.04, vol)
+        if abs(net_g["net_delta"]) >= self.spn_hedge_thresh.value() and abs(net_g["hedge_shares_needed"]) >= 1:
+            needed = self.options_port.execute_delta_hedge(self.underlying_s, 0.04, vol)
+            fee = abs(needed) * 0.01
+            self.options_port.cash -= fee
+            self.opt_hedge_fees += fee
+            self.opt_hedge_count += 1
+
+        self.update_options_ui()
+
     def on_execute_delta_hedge(self):
         vol = self.spn_vol.value()
         needed = self.options_port.execute_delta_hedge(self.underlying_s, 0.04, vol)
+        if abs(needed) > 0:
+            fee = abs(needed) * 0.01
+            self.options_port.cash -= fee
+            self.opt_hedge_fees += fee
+            self.opt_hedge_count += 1
         self.update_options_ui()
         if abs(needed) > 0:
             action = "BOUGHT" if needed > 0 else "SOLD"
             self.set_narration(
-                f"Hedge executed: {action} {abs(needed):.0f} shares @ ${self.underlying_s:.2f}. Portfolio PnL curve is now flat at spot.",
+                f"Hedge executed: {action} {abs(needed):.0f} shares @ ${self.underlying_s:.2f} (fee ${abs(needed)*0.01:.2f}).",
                 "success",
             )
         else:
             self.set_narration("Portfolio is already delta-neutral.", "info")
 
     def reset_options_port(self):
+        if self.is_opt_running:
+            self.toggle_options_loop()
         self.options_port = OptionsPortfolio(initial_cash=self.initial_options_cash)
         self.underlying_s = 100.0
+        self.opt_hedge_fees = 0.0
+        self.opt_hedge_count = 0
         self.lbl_spot_s.setText(f"Underlying Spot (S): ${self.underlying_s:.2f}")
         self.update_options_ui()
         self.set_narration("Options portfolio reset to $100,000 cash.", "info")
