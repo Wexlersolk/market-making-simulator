@@ -379,9 +379,20 @@ class MainWindow(QMainWindow):
         kpi_row.addWidget(c_mtm)
         r_layout.addLayout(kpi_row)
 
+        # Tick Inspector Bar (updates on chart hover)
+        self.lbl_tick_inspector = QLabel("Hover over chart to inspect exact tick values (Mid, r, Bid/Ask, Inventory, PnL)")
+        self.lbl_tick_inspector.setStyleSheet(
+            "background-color: #0b0f14; border: 1px solid #262c36; border-radius: 5px; "
+            "padding: 5px 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8b949e;"
+        )
+        r_layout.addWidget(self.lbl_tick_inspector)
+
         # 3-Panel Synchronized Chart (almost full height & width)
         self.fig_sim = Figure(figsize=(12, 8.5), facecolor="#131820")
         self.canvas_sim = FigureCanvasQTAgg(self.fig_sim)
+        self._crosshair_lines = []
+        self._sim_axes = []
+        self.canvas_sim.mpl_connect("motion_notify_event", self._on_sim_hover)
         r_layout.addWidget(self.canvas_sim, stretch=1)
 
         layout.addWidget(right_panel, stretch=1)
@@ -649,14 +660,48 @@ class MainWindow(QMainWindow):
         ax3.set_ylabel("PnL ($)", color="#8b949e", fontsize=9)
         ax3.legend(facecolor="#131820", edgecolor="#262c36", labelcolor="#c9d1d9", fontsize=8, loc="upper left", ncol=4)
 
+        self._sim_axes = list(axes)
+        self._crosshair_lines = []
         for ax in axes:
             ax.tick_params(colors="#8b949e", labelsize=8)
             for spine in ax.spines.values():
                 spine.set_color("#262c36")
             ax.grid(True, color="#1c2128", linestyle="--", alpha=0.7)
+            vl = ax.axvline(steps[-1] if steps else 0, color="#8b949e", linestyle=":", linewidth=1.0, alpha=0.0)
+            self._crosshair_lines.append(vl)
 
         self.fig_sim.subplots_adjust(left=0.06, right=0.985, top=0.955, bottom=0.065)
         self.canvas_sim.draw()
+
+    def _on_sim_hover(self, event):
+        if event.inaxes not in self._sim_axes or event.xdata is None or not self.history_steps:
+            return
+        target_step = int(round(event.xdata))
+        # Find nearest index in history_steps
+        start = self.history_steps[0]
+        idx = max(0, min(len(self.history_steps) - 1, target_step - start))
+        st = self.history_steps[idx]
+        mid = self.history_mids[idx]
+        r_p = self.history_res[idx]
+        b_p = self.history_bids[idx]
+        a_p = self.history_asks[idx]
+        q = self.history_inv[idx]
+        spr = self.history_spr_pnl[idx]
+        mtm = self.history_mtm_pnl[idx]
+
+        for vl in self._crosshair_lines:
+            vl.set_xdata([st, st])
+            vl.set_alpha(0.65)
+        self.canvas_sim.draw_idle()
+
+        self.lbl_tick_inspector.setText(
+            f"Step #{st}  |  Mid: ${mid:.2f}  |  r: ${r_p:.2f}  |  Quotes: ${b_p:.2f}/${a_p:.2f}  |  "
+            f"Inv: {q:+.0f}  |  Spread: ${spr:,.2f}  |  MTM: ${mtm:,.2f}"
+        )
+        self.lbl_tick_inspector.setStyleSheet(
+            "background-color: #0b0f14; border: 1px solid #30363d; border-radius: 5px; "
+            "padding: 5px 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #e6edf3;"
+        )
 
     def reset_sim(self):
         if self.is_sim_running:
