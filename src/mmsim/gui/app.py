@@ -19,6 +19,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 import numpy as np
 
+from mmsim.analytics import FillRecord, compute_markout_curve, run_monte_carlo_duel
 from mmsim.gui.style import DARK_THEME_QSS
 from mmsim.options import BlackScholesEngine, OptionContract, OptionType, OptionsPortfolio
 from mmsim.signals import MicrostructureSignalEngine
@@ -95,6 +96,8 @@ class MainWindow(QMainWindow):
         self.buy_fills: list[tuple[int, float]] = []    # (step, price)
         self.sell_fills: list[tuple[int, float]] = []   # (step, price)
         self.stale_fills: list[tuple[int, float]] = []  # (step, price)
+        self.fill_records: list[FillRecord] = []
+        self.last_mc_result = None
         self._init_sim_history()
 
         # Simulation Auto-Timer
@@ -109,6 +112,7 @@ class MainWindow(QMainWindow):
         self.update_sim_ui()
         self.update_dom_ui()
         self.update_options_ui()
+        self.update_analytics_ui()
         self.set_narration(
             "Ready. Step or start the HFT Simulator to compare Avellaneda-Stoikov vs FixedSpread and test Latency sniping.",
             "info",
@@ -131,6 +135,7 @@ class MainWindow(QMainWindow):
         self.buy_fills = []
         self.sell_fills = []
         self.stale_fills = []
+        self.fill_records = []
 
     def _build_ui(self):
         central = QWidget()
@@ -184,14 +189,17 @@ class MainWindow(QMainWindow):
         self.tab_sim = QWidget()
         self.tab_dom = QWidget()
         self.tab_options = QWidget()
+        self.tab_analytics = QWidget()
 
         self.tabs.addTab(self.tab_sim, "HFT Simulator & Avellaneda-Stoikov")
         self.tabs.addTab(self.tab_dom, "Depth of Market (DOM) & Queue")
         self.tabs.addTab(self.tab_options, "Options & Delta-Hedging")
+        self.tabs.addTab(self.tab_analytics, "Analytics: Markout & Monte Carlo")
 
         self._build_sim_tab()
         self._build_dom_tab()
         self._build_options_tab()
+        self._build_analytics_tab()
 
     def set_narration(self, text: str, alert_type: str = "info"):
         color = "#58a6ff" if alert_type == "info" else ("#00e676" if alert_type == "success" else "#ff5252")
@@ -428,6 +436,7 @@ class MainWindow(QMainWindow):
             for ev in events:
                 if ev.event_type == "TRADE" and "trade" in ev.details:
                     tr = ev.details["trade"]
+                    self.fill_records.append(FillRecord(step=step, side=tr.maker_side, price=tr.price, fair_at_fill=self.sim.fair_price))
                     is_stale = ev.details.get("stale_snipe", False)
                     if is_stale:
                         self.stale_fills.append((step, tr.price))
@@ -448,6 +457,7 @@ class MainWindow(QMainWindow):
 
         self.update_sim_ui()
         self.update_dom_ui()
+        self.update_analytics_ui()
 
     def update_sim_ui(self):
         inv = self.sim.mm.inventory
@@ -1120,6 +1130,154 @@ class MainWindow(QMainWindow):
         self.lbl_spot_s.setText(f"Underlying Spot (S): ${self.underlying_s:.2f}")
         self.update_options_ui()
         self.set_narration("Options portfolio reset to $100,000 cash.", "info")
+
+    # =========================================================================
+    # TAB 4: ANALYTICS — POST-FILL MARKOUT & MONTE CARLO DUEL
+    # =========================================================================
+    def _build_analytics_tab(self):
+        layout = QHBoxLayout(self.tab_analytics)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(12)
+
+        # Left Controls
+        left = QWidget()
+        left.setFixedWidth(340)
+        l_lay = QVBoxLayout(left)
+        l_lay.setContentsMargins(0, 0, 0, 0)
+        l_lay.setSpacing(8)
+
+        grp_mk = QGroupBox("Post-Fill Markout Diagnostic")
+        mk_lay = QVBoxLayout(grp_mk)
+        mk_info = QLabel(
+            "Measures average signed price move (0 to 10 ticks) AFTER your fills.\n\n"
+            "• Flat / positive curve = healthy spread capture.\n"
+            "• Dropping below $0 = adverse selection (toxic flow or stale quotes)."
+        )
+        mk_info.setWordWrap(True)
+        mk_info.setStyleSheet("color: #8b949e; font-size: 11px;")
+        mk_lay.addWidget(mk_info)
+        self.lbl_markout_fills = QLabel("Recorded Fills: 0")
+        self.lbl_markout_fills.setStyleSheet("font-family: 'JetBrains Mono'; font-weight: 700; color: #00e5ff;")
+        mk_lay.addWidget(self.lbl_markout_fills)
+        l_lay.addWidget(grp_mk)
+
+        grp_mc = QGroupBox("Batch Monte Carlo Duel (Uses Current Tab 1 Params)")
+        mc_lay = QGridLayout(grp_mc)
+
+        mc_lay.addWidget(QLabel("Paths:"), 0, 0)
+        self.spn_mc_paths = QSpinBox()
+        self.spn_mc_paths.setRange(5, 100)
+        self.spn_mc_paths.setValue(25)
+        mc_lay.addWidget(self.spn_mc_paths, 0, 1)
+
+        mc_lay.addWidget(QLabel("Ticks / Path:"), 1, 0)
+        self.spn_mc_steps = QSpinBox()
+        self.spn_mc_steps.setRange(50, 1000)
+        self.spn_mc_steps.setSingleStep(50)
+        self.spn_mc_steps.setValue(200)
+        mc_lay.addWidget(self.spn_mc_steps, 1, 1)
+
+        btn_run_mc = QPushButton("RUN MONTE CARLO DUEL")
+        btn_run_mc.setObjectName("primaryBtn")
+        btn_run_mc.clicked.connect(self.on_run_monte_carlo)
+        mc_lay.addWidget(btn_run_mc, 2, 0, 1, 2)
+
+        l_lay.addWidget(grp_mc)
+        l_lay.addStretch()
+        layout.addWidget(left)
+
+        # Right Charts & Summary KPIs
+        right = QWidget()
+        r_lay = QVBoxLayout(right)
+        r_lay.setContentsMargins(0, 0, 0, 0)
+        r_lay.setSpacing(8)
+
+        mc_kpis = QHBoxLayout()
+        mc_kpis.setSpacing(8)
+        c1, self.lbl_mc_as_mean, self.lbl_mc_as_sub = _make_kpi_card("A-S Mean PnL", "—", "#58a6ff")
+        c2, self.lbl_mc_fx_mean, self.lbl_mc_fx_sub = _make_kpi_card("FixedSpread Mean PnL", "—", "#f778ba")
+        c3, self.lbl_mc_as_dd, self.lbl_mc_as_dd_sub = _make_kpi_card("A-S Avg Max DD", "—", "#00e676")
+        c4, self.lbl_mc_fx_dd, self.lbl_mc_fx_dd_sub = _make_kpi_card("Fixed Avg Max DD", "—", "#ff5252")
+        mc_kpis.addWidget(c1)
+        mc_kpis.addWidget(c2)
+        mc_kpis.addWidget(c3)
+        mc_kpis.addWidget(c4)
+        r_lay.addLayout(mc_kpis)
+
+        self.fig_analytics = Figure(figsize=(10, 7.5), facecolor="#131820")
+        self.canvas_analytics = FigureCanvasQTAgg(self.fig_analytics)
+        r_lay.addWidget(self.canvas_analytics, stretch=1)
+
+        layout.addWidget(right, stretch=1)
+
+    def on_run_monte_carlo(self):
+        n_paths = self.spn_mc_paths.value()
+        n_steps = self.spn_mc_steps.value()
+        self.last_mc_result = run_monte_carlo_duel(
+            n_paths=n_paths,
+            n_steps=n_steps,
+            flow_regime=self.cmb_regime.currentData(),
+            gamma=self.sld_gamma.value() / 100.0,
+            sigma=self.sld_sigma.value() / 100.0,
+            kappa=self.sld_kappa.value() / 10.0,
+            rtt_ms=float(self.sld_latency.value()),
+        )
+        s = self.last_mc_result.summary()
+        self.lbl_mc_as_mean.setText(f"${s['as']['mean_pnl']:,.2f}")
+        self.lbl_mc_as_sub.setText(f"Sharpe: {s['as']['sharpe']:.2f} | Max|q|: {s['as']['avg_max_inv']:.1f}")
+        self.lbl_mc_fx_mean.setText(f"${s['fixed']['mean_pnl']:,.2f}")
+        self.lbl_mc_fx_sub.setText(f"Sharpe: {s['fixed']['sharpe']:.2f} | Max|q|: {s['fixed']['avg_max_inv']:.1f}")
+        self.lbl_mc_as_dd.setText(f"${s['as']['avg_max_dd']:,.2f}")
+        self.lbl_mc_fx_dd.setText(f"${s['fixed']['avg_max_dd']:,.2f}")
+
+        self.update_analytics_ui()
+        self.set_narration(
+            f"Monte Carlo complete ({n_paths}×{n_steps} ticks): A-S Mean ${s['as']['mean_pnl']:,.2f} vs FixedSpread ${s['fixed']['mean_pnl']:,.2f}.",
+            "success" if s["as"]["mean_pnl"] >= s["fixed"]["mean_pnl"] else "info",
+        )
+
+    def update_analytics_ui(self):
+        self.lbl_markout_fills.setText(f"Recorded Fills: {len(self.fill_records)}")
+        self.fig_analytics.clear()
+        ax1, ax2 = self.fig_analytics.subplots(2, 1, gridspec_kw={"hspace": 0.32})
+
+        # Top: Live Markout Curve
+        ax1.set_facecolor("#0b0f14")
+        horizons = (0, 1, 3, 5, 10)
+        start_step = self.history_steps[0] if self.history_steps else 0
+        curve = compute_markout_curve(self.fill_records, self.history_mids, start_step=start_step, horizons=horizons)
+        xs = list(horizons)
+        ys = [curve[h] for h in xs]
+        ax1.plot(xs, ys, "-o", color="#00e5ff", linewidth=2.2, markersize=7, label="Avg Signed Markout ($)")
+        ax1.fill_between(xs, 0, ys, where=[y >= 0 for y in ys], color="#00e676", alpha=0.15, interpolate=True)
+        ax1.fill_between(xs, 0, ys, where=[y < 0 for y in ys], color="#ff5252", alpha=0.15, interpolate=True)
+        ax1.axhline(0, color="#8b949e", linestyle="--", linewidth=1.0)
+        ax1.set_title("Live Post-Fill Markout Curve (Adverse Selection Diagnostic)", color="#f0f6fc", fontsize=10, fontweight="bold", loc="left")
+        ax1.set_xlabel("Ticks After Fill", color="#8b949e", fontsize=9)
+        ax1.set_ylabel("Avg Edge ($)", color="#8b949e", fontsize=9)
+        ax1.legend(facecolor="#131820", edgecolor="#262c36", labelcolor="#c9d1d9", fontsize=8, loc="upper right")
+
+        # Bottom: Monte Carlo PnL Distribution
+        ax2.set_facecolor("#0b0f14")
+        if self.last_mc_result is not None:
+            ax2.hist(self.last_mc_result.as_mtms, bins=12, alpha=0.65, color="#58a6ff", label="Avellaneda-Stoikov MTM")
+            ax2.hist(self.last_mc_result.fixed_mtms, bins=12, alpha=0.55, color="#f778ba", label="FixedSpread MTM")
+            ax2.axvline(0, color="#8b949e", linestyle="--", linewidth=1.0)
+            ax2.legend(facecolor="#131820", edgecolor="#262c36", labelcolor="#c9d1d9", fontsize=8, loc="upper left")
+        else:
+            ax2.text(0.5, 0.5, "Click 'RUN MONTE CARLO DUEL' to compare PnL distributions", ha="center", va="center", color="#8b949e", transform=ax2.transAxes)
+        ax2.set_title("Monte Carlo Final MTM PnL Distribution (A-S vs FixedSpread)", color="#f0f6fc", fontsize=10, fontweight="bold", loc="left")
+        ax2.set_xlabel("Final MTM PnL ($)", color="#8b949e", fontsize=9)
+        ax2.set_ylabel("Paths", color="#8b949e", fontsize=9)
+
+        for ax in (ax1, ax2):
+            ax.tick_params(colors="#8b949e", labelsize=8)
+            for spine in ax.spines.values():
+                spine.set_color("#262c36")
+            ax.grid(True, color="#1c2128", linestyle="--", alpha=0.7)
+
+        self.fig_analytics.subplots_adjust(left=0.07, right=0.98, top=0.94, bottom=0.08)
+        self.canvas_analytics.draw()
 
 
 def main():
