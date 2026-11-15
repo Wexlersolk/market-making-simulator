@@ -102,7 +102,7 @@ def run_monte_carlo_duel(
     flow_regime: FlowRegime = FlowRegime.NOISE,
     gamma: float = 0.1,
     sigma: float = 0.25,
-    kappa: float = 1.5,
+    kappa: float = 10.0,
     rtt_ms: float = 2.0,
 ) -> MonteCarloResult:
     """Run n_paths independent A/B simulations (Avellaneda-Stoikov vs FixedSpread)."""
@@ -121,6 +121,7 @@ def run_monte_carlo_duel(
             flow_regime=flow_regime,
             latency_profile=lat,
         )
+        sim.mm.model.tick_size = sim.tick_size
         sim.mm.model.gamma = gamma
         sim.mm.model.sigma = sigma
         sim.mm.model.kappa = kappa

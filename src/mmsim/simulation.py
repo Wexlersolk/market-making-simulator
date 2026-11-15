@@ -50,6 +50,8 @@ class MarketSimulator:
 
         self.book = OrderBook(tick_size=tick_size)
         self.mm = MarketMaker(trader_id="MM_USER")
+        self.mm.model.tick_size = tick_size
+        self.mm.model.kappa = 10.0
 
         # Parallel A/B Baseline (Fixed Spread, zero inventory skew)
         self.baseline_book = OrderBook(tick_size=tick_size)

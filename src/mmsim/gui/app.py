@@ -195,11 +195,20 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_dom, "Depth of Market (DOM) & Queue")
         self.tabs.addTab(self.tab_options, "Options & Delta-Hedging")
         self.tabs.addTab(self.tab_analytics, "Analytics: Markout & Monte Carlo")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self._build_sim_tab()
         self._build_dom_tab()
         self._build_options_tab()
         self._build_analytics_tab()
+
+    def _on_tab_changed(self, index: int):
+        if index == 1:
+            self.update_dom_ui()
+        elif index == 2:
+            self.update_options_ui()
+        elif index == 3:
+            self.update_analytics_ui()
 
     def set_narration(self, text: str, alert_type: str = "info"):
         color = "#58a6ff" if alert_type == "info" else ("#00e676" if alert_type == "success" else "#ff5252")
@@ -315,11 +324,11 @@ class MainWindow(QMainWindow):
 
         # Kappa (Order Arrival Intensity)
         as_layout.addWidget(QLabel("Flow Intensity (κ):"), 4, 0)
-        self.lbl_kappa_val = QLabel("1.50")
+        self.lbl_kappa_val = QLabel(f"{self.sim.mm.model.kappa:.2f}")
         self.lbl_kappa_val.setStyleSheet("font-family: 'JetBrains Mono'; font-weight: 700; color: #ffd700;")
         as_layout.addWidget(self.lbl_kappa_val, 4, 1, Qt.AlignmentFlag.AlignRight)
         self.sld_kappa = QSlider(Qt.Orientation.Horizontal)
-        self.sld_kappa.setRange(5, 50)  # 0.50 to 5.00
+        self.sld_kappa.setRange(20, 300)  # 2.00 to 30.00
         self.sld_kappa.setValue(int(self.sim.mm.model.kappa * 10))
         self.sld_kappa.valueChanged.connect(self.on_as_params_changed)
         as_layout.addWidget(self.sld_kappa, 5, 0, 1, 2)
@@ -1004,7 +1013,7 @@ class MainWindow(QMainWindow):
         self.spn_expiry.valueChanged.connect(self.update_options_ui)
         c_layout.addWidget(self.spn_expiry, 2, 1)
 
-        c_layout.addWidget(QLabel("Implied Vol (%):"), 3, 0)
+        c_layout.addWidget(QLabel("Implied Vol (σ, 0.25=25%):"), 3, 0)
         self.spn_vol = QDoubleSpinBox()
         self.spn_vol.setRange(0.05, 1.50)
         self.spn_vol.setValue(0.25)
@@ -1155,7 +1164,9 @@ class MainWindow(QMainWindow):
         self.fig_options.clear()
         ax1, ax2 = self.fig_options.subplots(2, 1, sharex=True, gridspec_kw={"hspace": 0.28})
 
-        s_range = np.linspace(max(10.0, k - 30.0), k + 30.0, 80)
+        min_s = max(10.0, min(k, self.underlying_s) - 30.0)
+        max_s = max(k, self.underlying_s) + 30.0
+        s_range = np.linspace(min_s, max_s, 80)
         now_prices = [BlackScholesEngine.price(s_i, k, 0.04, vol, tau, otype) for s_i in s_range]
         exp_prices = [BlackScholesEngine.price(s_i, k, 0.04, vol, 0.0, otype) for s_i in s_range]
         port_pnls = [self.options_port.mark_to_market(s_i, 0.04, vol) - self.initial_options_cash for s_i in s_range]
